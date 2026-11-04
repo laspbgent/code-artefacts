@@ -1,10 +1,8 @@
 name: run-simulation
 
-# Dispatched by the Rules Agent after it pushes a run to this repo.
-#
-# Deliberately player-free for now: this compiles the run's game against the core
-# crate and runs the harness, which is everything needed to judge a generated game
-# before any Player Agent exists. A later revision adds lobbies and turn events.
+# Dispatch after pushing a run branch. This is the check that decides whether the
+# Rules Agent did its job: the run's game.rs is installed as the games module's
+# `current.rs` and the whole crate is compiled and exercised.
 
 on:
   workflow_dispatch:
@@ -12,6 +10,10 @@ on:
       run_id:
         description: "run id, e.g. 20261104T1700Z-tictactoe"
         required: true
+      ref:
+        description: "ref in this repo holding the run"
+        required: false
+        default: ""
       core_ref:
         description: "ref of laspbgent/bgent-core to build against"
         required: false
@@ -21,35 +23,64 @@ on:
         required: false
         default: "749079"
 
+permissions:
+  contents: write
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the run's artefacts
+      - name: Check out this repo at the run
         uses: actions/checkout@v4
+        with:
+          path: artefacts
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Fetch the core crate
         run: |
           git clone --depth 1 --branch "${{ inputs.core_ref }}" \
             https://github.com/laspbgent/bgent-core.git core
+          rm -rf core/src/games
 
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
 
-      - name: Integrate and check
+      - name: Install the run as the games module and compile
         env:
           RUN_ID: ${{ inputs.run_id }}
           SEED: ${{ inputs.seed }}
         run: |
+          set -o pipefail
           python3 core/scripts/integrate.py \
             --run-id "$RUN_ID" \
-            --from-file "runs/$RUN_ID/game.rs" \
-            --out-dir "$RUN_ID/out" \
-            --seed "$SEED"
+            --from-file "artefacts/runs/$RUN_ID/game.rs" \
+            --modules-dir artefacts \
+            --out-dir "artefacts/$RUN_ID/out" \
+            --seed "$SEED" 2>&1 | tee integrate.log
 
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: report-${{ inputs.run_id }}
-          path: ${{ inputs.run_id }}/out/report.json
+          path: |
+            artefacts/${{ inputs.run_id }}/out/report.json
+            integrate.log
+
+      # The job-log endpoint redirects and our client cannot follow it, so on failure
+      # the output is committed to a branch instead of being unreachable.
+      - name: Publish the failure log
+        if: failure()
+        run: |
+          set -e
+          cd artefacts
+          git config user.name  "bgent-ci"
+          git config user.email "bgent-ci@users.noreply.github.com"
+          mkdir -p ci-logs
+          cp ../integrate.log "ci-logs/${RUN_ID:-run}-${GITHUB_SHA:0:10}.log"
+          git checkout -B ci-logs
+          git add -f ci-logs
+          git commit -m "ci: integration output for ${{ inputs.run_id }}"
+          git push -f origin ci-logs
+        env:
+          RUN_ID: ${{ inputs.run_id }}
