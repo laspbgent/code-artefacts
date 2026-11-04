@@ -40,7 +40,14 @@ jobs:
         run: |
           git clone --depth 1 --branch "${{ inputs.core_ref }}" \
             https://github.com/laspbgent/bgent-core.git core
+
+      - name: Mount this run's repo as the games module
+        run: |
+          set -e
           rm -rf core/src/games
+          cp -R artefacts core/src/games
+          test -f core/src/games/mod.rs
+          echo "games module populated from $(git -C artefacts rev-parse --short HEAD)"
 
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
@@ -53,8 +60,7 @@ jobs:
           set -o pipefail
           python3 core/scripts/integrate.py \
             --run-id "$RUN_ID" \
-            --from-file "artefacts/runs/$RUN_ID/game.rs" \
-            --modules-dir artefacts \
+            --from-file "core/src/games/runs/$RUN_ID/game.rs" \
             --out-dir "artefacts/$RUN_ID/out" \
             --seed "$SEED" 2>&1 | tee integrate.log
 
